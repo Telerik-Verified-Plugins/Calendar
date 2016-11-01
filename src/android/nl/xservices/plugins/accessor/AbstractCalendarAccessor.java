@@ -51,7 +51,7 @@ public abstract class AbstractCalendarAccessor {
     public JSONObject toJSONObject() {
       JSONObject obj = new JSONObject();
       try {
-        obj.put("id", this.id);
+        obj.put("id", this.eventId);
         obj.putOpt("message", this.message);
         obj.putOpt("location", this.location);
         obj.putOpt("title", this.title);
@@ -150,7 +150,7 @@ public abstract class AbstractCalendarAccessor {
                                                 String[] projection, String selection, String[] selectionArgs,
                                                 String sortOrder);
 
-  private Event[] fetchEventInstances(String title, String location, long startFrom, long startTo) {
+  private Event[] fetchEventInstances(String eventId, String title, String location, String notes, long startFrom, long startTo) {
     String[] projection = {
         this.getKey(KeyIndex.INSTANCES_ID),
         this.getKey(KeyIndex.INSTANCES_EVENT_ID),
@@ -165,21 +165,36 @@ public abstract class AbstractCalendarAccessor {
     String selection = "";
     List<String> selectionList = new ArrayList<String>();
 
-    if (title != null) {
-      //selection += Events.TITLE + "=?";
-      selection += Events.TITLE + " LIKE ?";
-      selectionList.add("%" + title + "%");
-    }
-    if (location != null && !location.equals("")) {
-      if (!"".equals(selection)) {
-        selection += " AND ";
+    if (eventId != null) {
+      selection += CalendarContract.Instances.EVENT_ID + " = ?";
+      selectionList.add(eventId);
+    } else {
+      if (title != null) {
+        //selection += Events.TITLE + "=?";
+        selection += Events.TITLE + " LIKE ?";
+        selectionList.add("%" + title + "%");
       }
-      selection += Events.EVENT_LOCATION + " LIKE ?";
-      selectionList.add("%" + location + "%");
+      if (location != null && !location.equals("")) {
+        if (!"".equals(selection)) {
+          selection += " AND ";
+        }
+        selection += Events.EVENT_LOCATION + " LIKE ?";
+        selectionList.add("%" + location + "%");
+      }
+      if (notes != null && !notes.equals("")) {
+        if (!"".equals(selection)) {
+          selection += " AND ";
+        }
+        selection += Events.DESCRIPTION + " LIKE ?";
+        selectionList.add("%" + notes + "%");
+      }
     }
 
     String[] selectionArgs = new String[selectionList.size()];
     Cursor cursor = queryEventInstances(startFrom, startTo, projection, selection, selectionList.toArray(selectionArgs), sortOrder);
+    if (cursor == null) {
+      return null;
+    }
     Event[] instances = null;
     if (cursor.moveToFirst()) {
       int idCol = cursor.getColumnIndex(this.getKey(KeyIndex.INSTANCES_ID));
@@ -201,7 +216,13 @@ public abstract class AbstractCalendarAccessor {
         i += 1;
       } while (cursor.moveToNext());
     }
-    return instances;
+
+    // if we don't find the event by id, try again by title etc - inline with iOS logic
+    if ((instances == null || instances.length == 0) && eventId != null) {
+      return fetchEventInstances(null, title, location, notes, startFrom, startTo);
+    } else {
+      return instances;
+    }
   }
 
   private String[] getActiveCalendarIds() {
@@ -355,10 +376,10 @@ public abstract class AbstractCalendarAccessor {
     return attendeeMap;
   }
 
-  public JSONArray findEvents(String title, String location, long startFrom, long startTo) {
+  public JSONArray findEvents(String eventId, String title, String location, String notes, long startFrom, long startTo) {
     JSONArray result = new JSONArray();
     // Fetch events from the instance table.
-    Event[] instances = fetchEventInstances(title, location, startFrom, startTo);
+    Event[] instances = fetchEventInstances(eventId, title, location, notes, startFrom, startTo);
     if (instances == null) {
       return result;
     }
@@ -388,7 +409,7 @@ public abstract class AbstractCalendarAccessor {
 
   public boolean deleteEvent(Uri eventsUri, long startFrom, long startTo, String title, String location) {
     ContentResolver resolver = this.cordova.getActivity().getApplicationContext().getContentResolver();
-    Event[] events = fetchEventInstances(title, location,startFrom, startTo);
+    Event[] events = fetchEventInstances(null, title, location, "", startFrom, startTo);
     int nrDeletedRecords = 0;
     if (events != null) {
       for (Event event : events) {
@@ -439,12 +460,12 @@ public abstract class AbstractCalendarAccessor {
       }
     }
 
-    // runtime exceptions are dealt with by the caller
-    Uri uri = cr.insert(eventsUri, values);
-    String createdEventID = uri.getLastPathSegment();
-    Log.d(LOG_TAG, "Created event with ID " + createdEventID);
-
+    String createdEventID = null;
     try {
+      Uri uri = cr.insert(eventsUri, values);
+      createdEventID = uri.getLastPathSegment();
+      Log.d(LOG_TAG, "Created event with ID " + createdEventID);
+
       if (firstReminderMinutes > -1) {
         ContentValues reminderValues = new ContentValues();
         reminderValues.put("event_id", Long.parseLong(uri.getLastPathSegment()));
@@ -506,9 +527,8 @@ public abstract class AbstractCalendarAccessor {
       if (created != null) {
         return created.getLastPathSegment();
       }
-    } catch (Throwable t) {
-      System.err.println(t.getMessage());
-      t.printStackTrace();
+    } catch (Exception e) {
+      Log.e(LOG_TAG, "Creating calendar failed.", e);
     }
     return null;
   };
